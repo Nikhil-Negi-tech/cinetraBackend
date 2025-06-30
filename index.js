@@ -24,7 +24,7 @@ const PORT = process.env.PORT || 5000;
 app.use(helmet());
 app.use(cors({
   origin: process.env.NODE_ENV === 'production' 
-    ? [process.env.CLIENT_URL || 'https://cinetra-by-nikhil.vercel.app/'] 
+    ? [process.env.CLIENT_URL || 'https://cinetra-by-nikhil.vercel.app'] 
     : [process.env.CLIENT_URL || 'http://localhost:5173', 'http://localhost:3000'],
   credentials: true
 }));
