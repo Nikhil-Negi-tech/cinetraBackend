@@ -145,7 +145,49 @@ const searchMulti = async (req, res) => {
   }
 };
 
+// Search suggestions (for debounced autocomplete)
+const searchSuggestions = async (req, res) => {
+  try {
+    const { query } = req.query;
+
+    if (!query || query.length < 2) {
+      return res.status(200).json({
+        success: true,
+        data: []
+      });
+    }
+
+    const params = {
+      query,
+      page: 1,
+      include_adult: false
+    };
+
+    const data = await tmdbRequest('/search/movie', params);
+    
+    const suggestions = data.results.slice(0, 8).map(movie => ({
+      id: movie.id,
+      title: movie.title,
+      poster: getPosterUrl(movie.poster_path, 'w342'),
+      releaseDate: movie.release_date,
+      rating: movie.vote_average
+    }));
+
+    res.json({
+      success: true,
+      data: suggestions
+    });
+  } catch (error) {
+    console.error('Search suggestions error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+};
+
 module.exports = {
   searchMovies,
-  searchMulti
+  searchMulti,
+  searchSuggestions
 };

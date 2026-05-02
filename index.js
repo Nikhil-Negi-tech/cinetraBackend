@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const path = require('path');
+const mongoose = require('mongoose');
 
 // Load environment variables from server/.env
 const envPath = path.join(__dirname, '.env');
@@ -15,10 +16,29 @@ if (!process.env.TMDB_READ_ACCESS_TOKEN) {
   process.env.PORT = '5000';
   process.env.NODE_ENV = 'development';
   process.env.CLIENT_URL = 'http://localhost:5173';
+  process.env.MONGODB_URI = 'mongodb+srv://neginikhilsingh6_db_user:JfU3Ik5HbGTzu3aa@cluster0.ycm1bhx.mongodb.net/?appName=Cluster0';
+  process.env.JWT_SECRET = 'your-secret-key-change-in-production';
 }
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+
+// Connect to MongoDB
+const connectDB = async () => {
+  try {
+    const conn = await mongoose.connect(process.env.MONGODB_URI, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true
+    });
+    console.log(`✅ MongoDB Connected: ${conn.connection.host}`);
+    return conn;
+  } catch (error) {
+    console.error('❌ MongoDB Connection Error:', error.message);
+    process.exit(1);
+  }
+};
+
+connectDB();
 
 // Middleware
 app.use(helmet());
@@ -31,6 +51,8 @@ app.use(cors({
 app.use(express.json());
 
 // Routes
+app.use('/api/auth', require('./routes/auth'));
+app.use('/api/users', require('./routes/users'));
 app.use('/api/movies', require('./routes/movies'));
 app.use('/api/genres', require('./routes/genres'));
 app.use('/api/search', require('./routes/search'));
@@ -40,7 +62,8 @@ app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'OK', 
     message: 'Cinetra API Server is running',
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'
   });
 });
 
