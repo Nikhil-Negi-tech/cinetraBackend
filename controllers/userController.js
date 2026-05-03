@@ -6,13 +6,46 @@ const { tmdbRequest } = require('../utils/tmdb');
 // @access  Private
 exports.addMovieLike = async (req, res) => {
   try {
-    const { movieId, movieTitle, genres, rating, posterPath } = req.body;
+    let { movieId, movieTitle, genres, rating, posterPath } = req.body;
     const userId = req.user.id;
+
+    console.log('📝 Like request received:', { userId, movieId, movieTitle, genres, rating, posterPath });
 
     if (!movieId || !movieTitle) {
       return res.status(400).json({
         success: false,
         error: 'Movie ID and title are required'
+      });
+    }
+
+    // If genres are empty, fetch movie details from TMDB to get genre_ids
+    if (!genres || genres.length === 0) {
+      try {
+        console.log('🔄 Fetching movie details from TMDB for genre info...');
+        const movieDetails = await tmdbRequest(`/movie/${movieId}`);
+        
+        // TMDB /movie/:id returns 'genres' as array of objects {id, name}
+        if (movieDetails.genres && Array.isArray(movieDetails.genres)) {
+          genres = movieDetails.genres.map(g => ({
+            id: g.id,
+            name: g.name
+          }));
+        } else {
+          genres = [];
+        }
+        
+        console.log('✅ Genres resolved from TMDB movie details:', genres);
+      } catch (error) {
+        console.error('⚠️ Could not fetch genres from TMDB:', error.message);
+        genres = [];
+      }
+    }
+
+
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        error: 'User ID not found in token'
       });
     }
 
@@ -22,7 +55,9 @@ exports.addMovieLike = async (req, res) => {
       // Update existing like
       like.rating = rating || like.rating;
       like.liked = true;
+      like.watchedAt = new Date();
       await like.save();
+      console.log('✅ Like updated:', like._id);
     } else {
       // Create new like
       like = await UserMovieLike.create({
@@ -31,8 +66,10 @@ exports.addMovieLike = async (req, res) => {
         movieTitle,
         genres: genres || [],
         rating,
-        posterPath
+        posterPath,
+        liked: true
       });
+      console.log('✅ Like created:', like._id);
     }
 
     res.status(200).json({
@@ -40,7 +77,7 @@ exports.addMovieLike = async (req, res) => {
       data: like
     });
   } catch (error) {
-    console.error('Add Like Error:', error);
+    console.error('❌ Add Like Error:', error);
     res.status(500).json({
       success: false,
       error: error.message || 'Server error'
@@ -77,16 +114,19 @@ exports.removeMovieLike = async (req, res) => {
 exports.getUserLikes = async (req, res) => {
   try {
     const userId = req.user.id;
-    const likes = await UserMovieLike.find({ userId, liked: true })
+    console.log('📚 Fetching likes for user:', userId);
+    
+    const likes = await UserMovieLike.find({ userId })
       .sort({ createdAt: -1 })
       .limit(50);
 
+    console.log(`✅ Found ${likes.length} likes for user`);
     res.status(200).json({
       success: true,
       data: likes
     });
   } catch (error) {
-    console.error('Get Likes Error:', error);
+    console.error('❌ Get Likes Error:', error);
     res.status(500).json({
       success: false,
       error: error.message || 'Server error'
@@ -102,26 +142,70 @@ exports.getRecommendations = async (req, res) => {
     const userId = req.user.id;
     const limit = parseInt(req.query.limit) || 20;
 
+    console.log('🎯 Getting recommendations for user:', userId);
+
     // Get user's liked movies with genres
-    const userLikes = await UserMovieLike.find({ userId, liked: true });
+    let userLikes = await UserMovieLike.find({ userId });
+
+    console.log(`📊 User has ${userLikes.length} likes`);
 
     if (userLikes.length === 0) {
+      console.log('⚠️ No likes found, returning empty recommendations');
       return res.status(200).json({
         success: true,
         data: [],
-        message: 'No likes found. Showing random popular movies.'
+        message: 'No likes found. Like some movies first!'
       });
+    }
+
+    // Fetch genres for any likes that are missing them
+    for (let like of userLikes) {
+      if (!like.genres || like.genres.length === 0) {
+        try {
+          console.log(`🔄 Fetching genres for movie ${like.movieId}: ${like.movieTitle}`);
+          const movieDetails = await tmdbRequest(`/movie/${like.movieId}`);
+          
+          // TMDB /movie/:id returns 'genres' as array of objects {id, name}
+          if (movieDetails.genres && Array.isArray(movieDetails.genres)) {
+            like.genres = movieDetails.genres.map(g => ({
+              id: g.id,
+              name: g.name
+            }));
+          } else {
+            like.genres = [];
+          }
+          
+          // Update in database
+          await UserMovieLike.updateOne(
+            { _id: like._id },
+            { genres: like.genres }
+          );
+          
+          console.log(`✅ Genres updated for ${like.movieTitle}:`, like.genres);
+        } catch (error) {
+          console.error(`⚠️ Could not fetch genres for movie ${like.movieId}:`, error.message);
+        }
+      }
     }
 
     // Extract genres from user's likes
     const genreMap = {};
     userLikes.forEach(like => {
-      if (like.genres && Array.isArray(like.genres)) {
+      console.log(`📽️ Like: ${like.movieTitle}`, { genres: like.genres, count: like.genres?.length });
+      
+      if (like.genres && Array.isArray(like.genres) && like.genres.length > 0) {
         like.genres.forEach(genre => {
-          genreMap[genre.id] = (genreMap[genre.id] || 0) + 1;
+          // Handle both {id, name} objects and plain numbers
+          const genreId = genre?.id || genre;
+          if (genreId) {
+            genreMap[genreId] = (genreMap[genreId] || 0) + 1;
+          }
         });
       }
     });
+
+    console.log('📊 Genre map:', genreMap);
+    console.log('🎬 Genre IDs found:', Object.keys(genreMap));
 
     // Get top genres (sorted by frequency)
     const topGenres = Object.entries(genreMap)
@@ -129,11 +213,14 @@ exports.getRecommendations = async (req, res) => {
       .slice(0, 3)
       .map(([genreId]) => parseInt(genreId));
 
+    console.log('⭐ Top 3 genres by frequency:', topGenres);
+
     if (topGenres.length === 0) {
+      console.log('⚠️ No genres extracted from likes');
       return res.status(200).json({
         success: true,
         data: [],
-        message: 'No genres found'
+        message: 'No genres found in your likes'
       });
     }
 
@@ -141,13 +228,19 @@ exports.getRecommendations = async (req, res) => {
     const recommendations = [];
     const movieIds = new Set(userLikes.map(l => l.movieId));
 
+    console.log('🚀 Fetching recommendations for genres:', topGenres);
+    console.log('🔒 Excluding user-liked movies:', Array.from(movieIds));
+
     for (const genreId of topGenres) {
       try {
+        console.log(`📡 Calling TMDB for genre ${genreId}...`);
         const response = await tmdbRequest('/discover/movie', {
           with_genres: genreId,
           sort_by: 'popularity.desc',
           page: 1
         });
+
+        console.log(`✅ Got ${response.results?.length || 0} results for genre ${genreId}`);
 
         // Filter out already liked movies
         response.results.forEach(movie => {
@@ -159,17 +252,19 @@ exports.getRecommendations = async (req, res) => {
 
         if (recommendations.length >= limit) break;
       } catch (error) {
-        console.error(`Error fetching movies for genre ${genreId}:`, error);
+        console.error(`❌ Error fetching movies for genre ${genreId}:`, error.message);
       }
     }
 
+    console.log(`🎬 Final recommendations count: ${recommendations.length}`);
     res.status(200).json({
       success: true,
       data: recommendations,
-      genresUsed: topGenres
+      genresUsed: topGenres,
+      recommendationCount: recommendations.length
     });
   } catch (error) {
-    console.error('Get Recommendations Error:', error);
+    console.error('❌ Get Recommendations Error:', error);
     res.status(500).json({
       success: false,
       error: error.message || 'Server error'
@@ -186,7 +281,7 @@ exports.getTrendingRecommendations = async (req, res) => {
     const limit = parseInt(req.query.limit) || 10;
 
     // Get user's liked movies with genres
-    const userLikes = await UserMovieLike.find({ userId, liked: true });
+    const userLikes = await UserMovieLike.find({ userId });
 
     if (userLikes.length === 0) {
       return res.status(200).json({
