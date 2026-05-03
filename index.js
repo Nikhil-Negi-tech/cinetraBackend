@@ -39,10 +39,15 @@ connectDB();
 
 // Middleware
 app.use(helmet());
+
+// Normalize CLIENT_URL (remove trailing slash for CORS)
+const normalizeUrl = (url) => url?.replace(/\/$/, '') || '';
+const clientUrl = normalizeUrl(process.env.CLIENT_URL);
+
 app.use(cors({
   origin: process.env.NODE_ENV === 'production' 
-    ? [process.env.CLIENT_URL || 'https://cinetra-by-nikhil.vercel.app'] 
-    : [process.env.CLIENT_URL || 'http://localhost:5173', 'http://localhost:3000'],
+    ? [clientUrl || 'https://cinetra-frontend.vercel.app'] 
+    : [clientUrl || 'http://localhost:5173', 'http://localhost:3000'],
   credentials: true
 }));
 app.use(express.json());
