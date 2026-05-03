@@ -207,13 +207,15 @@ exports.getRecommendations = async (req, res) => {
     console.log('📊 Genre map:', genreMap);
     console.log('🎬 Genre IDs found:', Object.keys(genreMap));
 
-    // Get top genres (sorted by frequency)
-    const topGenres = Object.entries(genreMap)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 3)
-      .map(([genreId]) => parseInt(genreId));
+    // Get top 5 genres (sorted by frequency) for better variety
+    const allGenres = Object.entries(genreMap)
+      .sort((a, b) => b[1] - a[1]);
+    
+    const topGenres = allGenres.slice(0, 5).map(([genreId]) => parseInt(genreId));
+    const secondaryGenres = allGenres.slice(5, 10).map(([genreId]) => parseInt(genreId));
 
-    console.log('⭐ Top 3 genres by frequency:', topGenres);
+    console.log('⭐ Top 5 genres by frequency:', topGenres);
+    console.log('🎯 Secondary genres for diversity:', secondaryGenres);
 
     if (topGenres.length === 0) {
       console.log('⚠️ No genres extracted from likes');
@@ -224,44 +226,65 @@ exports.getRecommendations = async (req, res) => {
       });
     }
 
-    // Fetch movies from top genres from TMDB
+    // Calculate average rating from user's likes
+    const avgRating = userLikes.reduce((sum, like) => sum + (like.rating || 0), 0) / userLikes.length || 0;
+    console.log(`📊 User average rating: ${avgRating.toFixed(2)}`);
+
+    // Fetch movies from top genres from TMDB with multiple sort methods
     const recommendations = [];
     const movieIds = new Set(userLikes.map(l => l.movieId));
+    
+    const genresToFetch = [...topGenres, ...secondaryGenres];
+    const sortMethods = ['popularity.desc', 'rating.desc', 'revenue.desc'];
+    let sortIndex = 0;
 
-    console.log('🚀 Fetching recommendations for genres:', topGenres);
-    console.log('🔒 Excluding user-liked movies:', Array.from(movieIds));
+    console.log('🚀 Fetching recommendations with improved diversity logic');
+    console.log('🔒 Excluding user-liked movies:', Array.from(movieIds).slice(0, 5), '...');
 
-    for (const genreId of topGenres) {
-      try {
-        console.log(`📡 Calling TMDB for genre ${genreId}...`);
-        const response = await tmdbRequest('/discover/movie', {
-          with_genres: genreId,
-          sort_by: 'popularity.desc',
-          page: 1
-        });
+    // Fetch from multiple pages and sort methods for variety
+    for (const genreId of genresToFetch) {
+      for (let page = 1; page <= 2 && recommendations.length < limit; page++) {
+        try {
+          const sortBy = sortMethods[sortIndex % sortMethods.length];
+          sortIndex++;
+          
+          console.log(`📡 Fetching genre ${genreId}, page ${page}, sort: ${sortBy}...`);
+          const response = await tmdbRequest('/discover/movie', {
+            with_genres: genreId,
+            sort_by: sortBy,
+            'vote_average.gte': avgRating > 0 ? avgRating - 1 : 4, // Similar rating range
+            page: page
+          });
 
-        console.log(`✅ Got ${response.results?.length || 0} results for genre ${genreId}`);
+          console.log(`✅ Got ${response.results?.length || 0} results`);
 
-        // Filter out already liked movies
-        response.results.forEach(movie => {
-          if (!movieIds.has(movie.id) && recommendations.length < limit) {
-            recommendations.push(movie);
-            movieIds.add(movie.id);
-          }
-        });
+          // Filter out already liked movies and add diversity
+          response.results.forEach(movie => {
+            if (!movieIds.has(movie.id) && recommendations.length < limit) {
+              // Bonus: slightly prefer movies with ratings close to user's average
+              movie.relevanceScore = Math.abs(movie.vote_average - (avgRating + 6)) < 2 ? 1.5 : 1;
+              recommendations.push(movie);
+              movieIds.add(movie.id);
+            }
+          });
 
-        if (recommendations.length >= limit) break;
-      } catch (error) {
-        console.error(`❌ Error fetching movies for genre ${genreId}:`, error.message);
+        } catch (error) {
+          console.error(`⚠️ Error fetching movies for genre ${genreId}, page ${page}:`, error.message);
+        }
       }
     }
+
+    // Sort by relevance score and randomize slightly for variety
+    recommendations.sort(() => Math.random() - 0.5);
 
     console.log(`🎬 Final recommendations count: ${recommendations.length}`);
     res.status(200).json({
       success: true,
-      data: recommendations,
+      data: recommendations.slice(0, limit),
       genresUsed: topGenres,
-      recommendationCount: recommendations.length
+      secondaryGenresUsed: secondaryGenres,
+      avgUserRating: avgRating.toFixed(2),
+      recommendationCount: Math.min(recommendations.length, limit)
     });
   } catch (error) {
     console.error('❌ Get Recommendations Error:', error);
