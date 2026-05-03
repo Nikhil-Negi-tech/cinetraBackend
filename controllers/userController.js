@@ -207,15 +207,35 @@ exports.getRecommendations = async (req, res) => {
     console.log('📊 Genre map:', genreMap);
     console.log('🎬 Genre IDs found:', Object.keys(genreMap));
 
-    // Get top 5 genres (sorted by frequency) for better variety
-    const allGenres = Object.entries(genreMap)
+    // ENHANCED RECOMMENDATION ENGINE - Multi-Strategy Hybrid Approach
+    
+    // Strategy 1: Weighted Genre Extraction (newer likes weighted higher)
+    const genreWeightMap = {};
+    const now = new Date();
+    
+    userLikes.forEach((like, index) => {
+      const daysAgo = Math.floor((now - like.createdAt) / (1000 * 60 * 60 * 24));
+      const recencyWeight = Math.max(1, 2 - (daysAgo / 30)); // Recent likes weighted higher
+      
+      if (like.genres && Array.isArray(like.genres) && like.genres.length > 0) {
+        like.genres.forEach(genre => {
+          const genreId = genre?.id || genre;
+          if (genreId) {
+            genreWeightMap[genreId] = (genreWeightMap[genreId] || 0) + recencyWeight;
+          }
+        });
+      }
+    });
+
+    // Get top 6 genres with better weighting
+    const allGenresByWeight = Object.entries(genreWeightMap)
       .sort((a, b) => b[1] - a[1]);
     
-    const topGenres = allGenres.slice(0, 5).map(([genreId]) => parseInt(genreId));
-    const secondaryGenres = allGenres.slice(5, 10).map(([genreId]) => parseInt(genreId));
+    const topGenres = allGenresByWeight.slice(0, 6).map(([genreId]) => parseInt(genreId));
+    const secondaryGenres = allGenresByWeight.slice(6, 12).map(([genreId]) => parseInt(genreId));
 
-    console.log('⭐ Top 5 genres by frequency:', topGenres);
-    console.log('🎯 Secondary genres for diversity:', secondaryGenres);
+    console.log('⭐ Top 6 genres (weighted by recency):', topGenres);
+    console.log('🎯 Secondary genres:', secondaryGenres);
 
     if (topGenres.length === 0) {
       console.log('⚠️ No genres extracted from likes');
@@ -226,65 +246,150 @@ exports.getRecommendations = async (req, res) => {
       });
     }
 
-    // Calculate average rating from user's likes
-    const avgRating = userLikes.reduce((sum, like) => sum + (like.rating || 0), 0) / userLikes.length || 0;
-    console.log(`📊 User average rating: ${avgRating.toFixed(2)}`);
+    // Strategy 2: Calculate user rating preferences
+    const avgRating = userLikes.reduce((sum, like) => sum + (like.rating || 0), 0) / userLikes.length || 6.5;
+    const ratingStd = Math.sqrt(
+      userLikes.reduce((sum, like) => sum + Math.pow((like.rating || 0) - avgRating, 2), 0) / userLikes.length
+    );
+    
+    console.log(`📊 User rating profile: avg=${avgRating.toFixed(2)}, std=${ratingStd.toFixed(2)}`);
 
-    // Fetch movies from top genres from TMDB with multiple sort methods
-    const recommendations = [];
+    // Strategy 3: Multi-strategy recommendation collection
+    const recommendationMap = new Map(); // movieId -> {movie, score}
     const movieIds = new Set(userLikes.map(l => l.movieId));
     
-    const genresToFetch = [...topGenres, ...secondaryGenres];
-    const sortMethods = ['popularity.desc', 'rating.desc', 'revenue.desc'];
-    let sortIndex = 0;
+    const sortStrategies = ['popularity.desc', 'vote_average.desc', 'revenue.desc'];
+    const qualityThreshold = Math.max(4, avgRating - 1.5);
 
-    console.log('🚀 Fetching recommendations with improved diversity logic');
-    console.log('🔒 Excluding user-liked movies:', Array.from(movieIds).slice(0, 5), '...');
+    console.log('🚀 ENHANCED: Running multi-strategy recommendation engine');
 
-    // Fetch from multiple pages and sort methods for variety
-    for (const genreId of genresToFetch) {
-      for (let page = 1; page <= 2 && recommendations.length < limit; page++) {
+    // Sub-Strategy A: Genre + Rating Based
+    for (const genreId of topGenres) {
+      for (let page = 1; page <= 3; page++) {
         try {
-          const sortBy = sortMethods[sortIndex % sortMethods.length];
-          sortIndex++;
-          
-          console.log(`📡 Fetching genre ${genreId}, page ${page}, sort: ${sortBy}...`);
           const response = await tmdbRequest('/discover/movie', {
             with_genres: genreId,
-            sort_by: sortBy,
-            'vote_average.gte': avgRating > 0 ? avgRating - 1 : 4, // Similar rating range
+            sort_by: sortStrategies[(page - 1) % sortStrategies.length],
+            'vote_count.gte': 500, // Only popular movies
+            'vote_average.gte': qualityThreshold,
             page: page
           });
 
-          console.log(`✅ Got ${response.results?.length || 0} results`);
-
-          // Filter out already liked movies and add diversity
-          response.results.forEach(movie => {
-            if (!movieIds.has(movie.id) && recommendations.length < limit) {
-              // Bonus: slightly prefer movies with ratings close to user's average
-              movie.relevanceScore = Math.abs(movie.vote_average - (avgRating + 6)) < 2 ? 1.5 : 1;
-              recommendations.push(movie);
-              movieIds.add(movie.id);
+          response.results?.forEach(movie => {
+            if (!movieIds.has(movie.id) && movie.vote_average >= qualityThreshold) {
+              const existing = recommendationMap.get(movie.id);
+              
+              // Score based on: rating match + popularity + vote count
+              const ratingScore = 1 - Math.abs(movie.vote_average - (avgRating + 6)) / 10;
+              const popularityScore = Math.min(movie.popularity / 100, 1);
+              const voteScore = Math.min(movie.vote_count / 5000, 1);
+              
+              const totalScore = (ratingScore * 0.5) + (popularityScore * 0.3) + (voteScore * 0.2);
+              
+              if (!existing || totalScore > existing.score) {
+                recommendationMap.set(movie.id, {
+                  ...movie,
+                  score: totalScore,
+                  source: 'genre-based'
+                });
+              }
             }
           });
-
         } catch (error) {
-          console.error(`⚠️ Error fetching movies for genre ${genreId}, page ${page}:`, error.message);
+          console.error(`⚠️ Genre ${genreId}, page ${page} failed:`, error.message);
         }
       }
     }
 
-    // Sort by relevance score and randomize slightly for variety
-    recommendations.sort(() => Math.random() - 0.5);
+    // Sub-Strategy B: Trending in Preferred Genres
+    for (const genreId of topGenres.slice(0, 3)) {
+      try {
+        const response = await tmdbRequest('/discover/movie', {
+          with_genres: genreId,
+          sort_by: 'popularity.desc',
+          'release_date.gte': new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString().split('T')[0], // Last 6 months
+          'vote_average.gte': qualityThreshold,
+          page: 1
+        });
 
-    console.log(`🎬 Final recommendations count: ${recommendations.length}`);
+        response.results?.forEach(movie => {
+          if (!movieIds.has(movie.id)) {
+            const existing = recommendationMap.get(movie.id);
+            const trendScore = Math.min(movie.popularity / 50, 1) * 1.2; // Boost trending
+            
+            if (!existing || trendScore > existing.score) {
+              recommendationMap.set(movie.id, {
+                ...movie,
+                score: trendScore,
+                source: 'trending'
+              });
+            }
+          }
+        });
+      } catch (error) {
+        console.error(`⚠️ Trending for genre ${genreId} failed:`, error.message);
+      }
+    }
+
+    // Sub-Strategy C: Secondary Genres for Diversity
+    for (const genreId of secondaryGenres.slice(0, 3)) {
+      try {
+        const response = await tmdbRequest('/discover/movie', {
+          with_genres: genreId,
+          sort_by: 'vote_average.desc',
+          'vote_average.gte': qualityThreshold,
+          'vote_count.gte': 300,
+          page: 1
+        });
+
+        response.results?.forEach(movie => {
+          if (!movieIds.has(movie.id)) {
+            const existing = recommendationMap.get(movie.id);
+            const diversityScore = Math.min(movie.vote_average / 10, 1) * 0.8; // Slightly lower weight
+            
+            if (!existing || diversityScore > existing.score) {
+              recommendationMap.set(movie.id, {
+                ...movie,
+                score: diversityScore,
+                source: 'diversity'
+              });
+            }
+          }
+        });
+      } catch (error) {
+        console.error(`⚠️ Secondary genre ${genreId} failed:`, error.message);
+      }
+    }
+
+    // Convert to array, sort by score, and apply intelligent blending
+    let recommendations = Array.from(recommendationMap.values())
+      .sort((a, b) => b.score - a.score);
+
+    // Intelligent blending: 60% top-scored, 30% mid-scored, 10% random
+    const topScored = recommendations.slice(0, Math.floor(limit * 0.6));
+    const midScored = recommendations.slice(Math.floor(limit * 0.6), Math.floor(limit * 0.9));
+    const remaining = recommendations.slice(Math.floor(limit * 0.9));
+
+    recommendations = [
+      ...topScored,
+      ...midScored.sort(() => Math.random() - 0.5),
+      ...remaining.sort(() => Math.random() - 0.5)
+    ].slice(0, limit);
+
+    console.log(`🎬 Enhanced recommendations: ${recommendations.length} movies`);
+    console.log(`📈 Score distribution - Top: ${topScored.length}, Mid: ${midScored.length}, Diverse: ${remaining.length}`);
+
     res.status(200).json({
       success: true,
-      data: recommendations.slice(0, limit),
-      genresUsed: topGenres,
-      secondaryGenresUsed: secondaryGenres,
-      avgUserRating: avgRating.toFixed(2),
-      recommendationCount: Math.min(recommendations.length, limit)
+      data: recommendations,
+      engine: 'HYBRID_MULTI_STRATEGY',
+      strategy: {
+        genresUsed: topGenres.length,
+        qualityThreshold: qualityThreshold.toFixed(2),
+        avgUserRating: avgRating.toFixed(2),
+        blending: '60% Top-scored + 30% Mid-scored + 10% Diverse'
+      },
+      recommendationCount: recommendations.length
     });
   } catch (error) {
     console.error('❌ Get Recommendations Error:', error);
